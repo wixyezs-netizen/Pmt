@@ -11,13 +11,14 @@ import os
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, unquote, quote
 from collections import OrderedDict
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
-    LabeledPrice, PreCheckoutQuery, FSInputFile
+    LabeledPrice, PreCheckoutQuery, FSInputFile,
+    InputMediaPhoto
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -54,6 +55,19 @@ class Config:
 
     # Путь к приветственному изображению (относительно корня проекта)
     START_IMAGE_PATH = os.environ.get("START_IMAGE_PATH", "images/start_image.jpg")
+    # Текст приветствия
+    START_TEXT = (
+        "PMT | STANDOFF 2 PREMIUM 💰\n\n"
+        "🚀 Универсальное решение:\n"
+        "📱 Android (APK, без Root)\n"
+        "💻 PC\n"
+        "🍏 iOS\n\n"
+        "🔥 Функционал:\n"
+        "• Аимбот + WallHack + ESP\n"
+        "• Анти-бан защита\n\n"
+        "Лучшие цены | Быстрая поддержка 24/7\n\n"
+        "Покупай чит, и разноси своих соперников ⚡️"
+    )
 
     @classmethod
     def init(cls):
@@ -422,6 +436,13 @@ dp = Dispatcher(storage=storage)
 orders = OrderStorage(max_pending=Config.MAX_PENDING_ORDERS, expiry_seconds=Config.ORDER_EXPIRY_SECONDS)
 rate_limiter = RateLimiter(interval=Config.RATE_LIMIT_SECONDS)
 
+# Глобальная переменная для хранения медиа-файла (чтобы не создавать каждый раз)
+start_photo = None
+try:
+    start_photo = FSInputFile(Config.START_IMAGE_PATH)
+except Exception:
+    logger.warning("Start image not found")
+
 
 # ========== СОСТОЯНИЯ ==========
 class OrderState(StatesGroup):
@@ -609,59 +630,60 @@ async def send_admin_notification(user, product, payment_method, price, order_id
             logger.error("Error sending to admin %s: %s", aid, e)
 
 
-# ========== ИЗМЕНЕННАЯ ФУНКЦИЯ ОТПРАВКИ СТАРТОВОГО СООБЩЕНИЯ С ФОТО ==========
-async def send_start_message(target, state):
-    new_text = (
-        "PMT | STANDOFF 2 PREMIUM 💰\n\n"
-        "🚀 Универсальное решение:\n"
-        "📱 Android (APK, без Root)\n"
-        "💻 PC\n"
-        "🍏 iOS\n\n"
-        "🔥 Функционал:\n"
-        "• Аимбот + WallHack + ESP\n"
-        "• Анти-бан защита\n\n"
-        "Лучшие цены | Быстрая поддержка 24/7\n\n"
-        "Покупай чит, и разноси своих соперников ⚡️"
-    )
+# ========== ФУНКЦИИ ДЛЯ РЕДАКТИРОВАНИЯ СООБЩЕНИЙ ==========
+async def edit_or_send_start(target: Union[types.Message, types.CallbackQuery], state: FSMContext):
+    """Редактирует текущее сообщение на стартовое с фото или отправляет новое, если это невозможно"""
     keyboard = start_keyboard()
-
-    # Пытаемся отправить фото, если файл существует
-    try:
-        photo = FSInputFile(Config.START_IMAGE_PATH)
-        has_photo = True
-    except Exception:
-        has_photo = False
-
-    if isinstance(target, types.Message):
-        if has_photo:
-            await target.answer_photo(photo=photo, caption=new_text, reply_markup=keyboard)
-        else:
-            await target.answer(new_text, reply_markup=keyboard)
-    elif isinstance(target, types.CallbackQuery):
-        # Удаляем предыдущее сообщение и отправляем новое
+    
+    if isinstance(target, types.CallbackQuery):
+        # Пытаемся отредактировать сообщение
         try:
-            await target.message.delete()
-        except Exception:
-            pass
-        if has_photo:
-            await target.message.answer_photo(photo=photo, caption=new_text, reply_markup=keyboard)
+            if start_photo:
+                # Если есть фото, редактируем медиа
+                media = InputMediaPhoto(media=start_photo, caption=Config.START_TEXT, parse_mode="HTML")
+                await target.message.edit_media(media, reply_markup=keyboard)
+            else:
+                # Если фото нет, редактируем текст
+                await target.message.edit_text(Config.START_TEXT, reply_markup=keyboard)
+        except Exception as e:
+            # Если не получилось отредактировать (например, сообщение без фото), отправляем новое
+            logger.warning("Could not edit message: %s", e)
+            try:
+                await target.message.delete()
+            except Exception:
+                pass
+            if start_photo:
+                await target.message.answer_photo(photo=start_photo, caption=Config.START_TEXT, reply_markup=keyboard)
+            else:
+                await target.message.answer(Config.START_TEXT, reply_markup=keyboard)
+    elif isinstance(target, types.Message):
+        # Для нового сообщения отправляем с фото
+        if start_photo:
+            await target.answer_photo(photo=start_photo, caption=Config.START_TEXT, reply_markup=keyboard)
         else:
-            await target.message.answer(new_text, reply_markup=keyboard)
+            await target.answer(Config.START_TEXT, reply_markup=keyboard)
+    
     await state.set_state(OrderState.main_menu)
 
 
-async def send_platform_message(target, state):
-    text = (
-        "\U0001f3ae <b>\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0443:</b>\n\n"
-        "\U0001f4f1 <b>Android</b> \u2014 APK \u0444\u0430\u0439\u043b\n"
-        "\U0001f34e <b>iOS</b> \u2014 IPA \u0444\u0430\u0439\u043b"
-    )
-    if isinstance(target, types.CallbackQuery):
-        try:
-            await target.message.edit_text(text, reply_markup=platform_keyboard())
-        except Exception:
-            await target.message.answer(text, reply_markup=platform_keyboard())
-    await state.set_state(OrderState.choosing_platform)
+async def edit_message_text_safe(message: types.Message, text: str, reply_markup: InlineKeyboardMarkup = None):
+    """Безопасно редактирует текст сообщения, если сообщение имеет фото - сначала удаляет"""
+    try:
+        # Пробуем отредактировать
+        await message.edit_text(text, reply_markup=reply_markup)
+    except Exception as e:
+        # Если сообщение содержит медиа (фото) и не может быть отредактировано как текст
+        if "message can't be edited" in str(e).lower() or "message is not modified" in str(e).lower():
+            try:
+                await message.delete()
+                if start_photo:
+                    await message.answer_photo(photo=start_photo, caption=text, reply_markup=reply_markup)
+                else:
+                    await message.answer(text, reply_markup=reply_markup)
+            except Exception:
+                pass
+        else:
+            raise
 
 
 # ========== ОБРАБОТЧИКИ ==========
@@ -692,12 +714,17 @@ async def cmd_start(message: types.Message, state: FSMContext):
                     start_parameter="pmt_payment"
                 )
                 return
-    await send_start_message(message, state)
+    await edit_or_send_start(message, state)
 
 
 @dp.callback_query(F.data == "buy_cheat")
 async def buy_cheat(callback: types.CallbackQuery, state: FSMContext):
-    await send_platform_message(callback, state)
+    text = "💰 <b>Выберите платформу:</b>\n\n📱 <b>Android</b> — APK файл\n🍏 <b>iOS</b> — IPA файл"
+    try:
+        await callback.message.edit_text(text, reply_markup=platform_keyboard())
+    except Exception:
+        await callback.message.answer(text, reply_markup=platform_keyboard())
+    await state.set_state(OrderState.choosing_platform)
     await callback.answer()
 
 
@@ -719,7 +746,6 @@ async def about_cheat(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# ========== ИЗМЕНЕННЫЙ ОБРАБОТЧИК ВЫБОРА ПЛАТФОРМЫ (УБРАН ДЛИННЫЙ ТЕКСТ) ==========
 @dp.callback_query(F.data.startswith("platform_"))
 async def process_platform(callback: types.CallbackQuery, state: FSMContext):
     platform = callback.data.split("_")[1]
@@ -727,7 +753,6 @@ async def process_platform(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("\u274c \u041e\u0448\u0438\u0431\u043a\u0430", show_alert=True)
         return
     await state.update_data(platform=platform)
-    # Новый короткий текст
     text = "💰 <b>Выберите тариф:</b>"
     await callback.message.edit_text(text, reply_markup=subscription_keyboard(platform))
     await state.set_state(OrderState.choosing_subscription)
@@ -1072,14 +1097,14 @@ async def cmd_help(message: types.Message):
 @dp.callback_query(F.data == "restart")
 async def restart_order(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await send_start_message(callback, state)
+    await edit_or_send_start(callback, state)
     await callback.answer()
 
 
 @dp.callback_query(F.data == "back_to_start")
 async def back_to_start(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await send_start_message(callback, state)
+    await edit_or_send_start(callback, state)
     await callback.answer()
 
 
@@ -1087,8 +1112,7 @@ async def back_to_start(callback: types.CallbackQuery, state: FSMContext):
 async def back_to_subscription(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     platform = data.get("platform", "apk")
-    titles = {"apk": "\U0001f4f1 <b>PMT Android</b>", "ios": "\U0001f34e <b>PMT iOS</b>"}
-    text = "{}\n\n\U0001f4b0 <b>\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0442\u0430\u0440\u0438\u0444:</b>".format(titles.get(platform, "PMT"))
+    text = "💰 <b>Выберите тариф:</b>"
     await callback.message.edit_text(text, reply_markup=subscription_keyboard(platform))
     await state.set_state(OrderState.choosing_subscription)
     await callback.answer()
