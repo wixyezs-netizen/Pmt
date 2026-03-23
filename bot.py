@@ -17,7 +17,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
-    LabeledPrice, PreCheckoutQuery
+    LabeledPrice, PreCheckoutQuery, FSInputFile
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -52,6 +52,9 @@ class Config:
     MAX_PAYMENT_CHECK_ATTEMPTS = 5
     PAYMENT_CHECK_INTERVAL = 5
 
+    # Путь к приветственному изображению (относительно корня проекта)
+    START_IMAGE_PATH = os.environ.get("START_IMAGE_PATH", "images/start_image.jpg")
+
     @classmethod
     def init(cls):
         if not cls.BOT_TOKEN:
@@ -81,6 +84,10 @@ class Config:
             logger.warning("YOOMONEY_ACCESS_TOKEN not set - card payments disabled")
         if not cls.YOOMONEY_WALLET:
             logger.warning("YOOMONEY_WALLET not set - card payments disabled")
+
+        # Проверяем, существует ли файл с изображением
+        if not os.path.isfile(cls.START_IMAGE_PATH):
+            logger.warning("Start image not found at %s", cls.START_IMAGE_PATH)
 
 
 # ========== ХРАНИЛИЩЕ ДАННЫХ ==========
@@ -427,35 +434,35 @@ class OrderState(StatesGroup):
 # ========== КЛАВИАТУРЫ ==========
 def start_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\U0001f3ae \u041a\u0443\u043f\u0438\u0442\u044c \u0447\u0438\u0442 Standoff 2", callback_data="buy_cheat")],
-        [InlineKeyboardButton(text="\u2139\ufe0f \u041e \u043f\u0440\u043e\u0433\u0440\u0430\u043c\u043c\u0435", callback_data="about")],
-        [InlineKeyboardButton(text="\U0001f4ac \u041f\u043e\u0434\u0434\u0435\u0440\u0436\u043a\u0430", url="https://t.me/{}".format(Config.SUPPORT_CHAT_USERNAME))]
+        [InlineKeyboardButton(text="🛒 Купить чит", callback_data="buy_cheat")],
+        [InlineKeyboardButton(text="ℹ️ О программе", callback_data="about")],
+        [InlineKeyboardButton(text="💬 Поддержка", url="https://t.me/{}".format(Config.SUPPORT_CHAT_USERNAME))]
     ])
 
 
 def platform_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\U0001f4f1 Android", callback_data="platform_apk")],
-        [InlineKeyboardButton(text="\U0001f34e iOS", callback_data="platform_ios")],
-        [InlineKeyboardButton(text="\u25c0\ufe0f \u041d\u0430\u0437\u0430\u0434", callback_data="back_to_start")]
+        [InlineKeyboardButton(text="📱 Android", callback_data="platform_apk")],
+        [InlineKeyboardButton(text="🍏 iOS", callback_data="platform_ios")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_start")]
     ])
 
 
 def subscription_keyboard(platform):
     prices = {
         "apk": [
-            ("\u26a1 \u041d\u0415\u0414\u0415\u041b\u042f \u2014 205\u20bd", "sub_apk_week"),
-            ("\U0001f525 \u041c\u0415\u0421\u042f\u0426 \u2014 450\u20bd", "sub_apk_month"),
-            ("\U0001f48e \u041d\u0410\u0412\u0421\u0415\u0413\u0414\u0410 \u2014 890\u20bd", "sub_apk_forever"),
+            ("⚡ НЕДЕЛЯ — 205₽", "sub_apk_week"),
+            ("🔥 МЕСЯЦ — 450₽", "sub_apk_month"),
+            ("💎 НАВСЕГДА — 890₽", "sub_apk_forever"),
         ],
         "ios": [
-            ("\u26a1 \u041d\u0415\u0414\u0415\u041b\u042f \u2014 359\u20bd", "sub_ios_week"),
-            ("\U0001f525 \u041c\u0415\u0421\u042f\u0426 \u2014 750\u20bd", "sub_ios_month"),
-            ("\U0001f48e \u041d\u0410\u0412\u0421\u0415\u0413\u0414\u0410 \u2014 1400\u20bd", "sub_ios_forever"),
+            ("⚡ НЕДЕЛЯ — 359₽", "sub_ios_week"),
+            ("🔥 МЕСЯЦ — 750₽", "sub_ios_month"),
+            ("💎 НАВСЕГДА — 1400₽", "sub_ios_forever"),
         ]
     }
     buttons = [[InlineKeyboardButton(text=text, callback_data=cb)] for text, cb in prices.get(platform, [])]
-    buttons.append([InlineKeyboardButton(text="\u25c0\ufe0f \u041d\u0430\u0437\u0430\u0434", callback_data="buy_cheat")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="buy_cheat")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -463,65 +470,65 @@ def payment_methods_keyboard(product):
     pc = product['platform_code']
     p = product['period']
     buttons = [
-        [InlineKeyboardButton(text="\U0001f4b3 \u041a\u0430\u0440\u0442\u043e\u0439", callback_data="pay_yoomoney_{}_{}".format(pc, p))],
-        [InlineKeyboardButton(text="\u2b50 Telegram Stars", callback_data="pay_stars_{}_{}".format(pc, p))],
-        [InlineKeyboardButton(text="\u20bf \u041a\u0440\u0438\u043f\u0442\u043e\u0431\u043e\u0442", callback_data="pay_crypto_{}_{}".format(pc, p))],
-        [InlineKeyboardButton(text="\U0001f4b0 GOLD", callback_data="pay_gold_{}_{}".format(pc, p))],
-        [InlineKeyboardButton(text="\U0001f3a8 NFT", callback_data="pay_nft_{}_{}".format(pc, p))],
-        [InlineKeyboardButton(text="\u25c0\ufe0f \u041d\u0430\u0437\u0430\u0434", callback_data="back_to_subscription")]
+        [InlineKeyboardButton(text="💳 Картой", callback_data="pay_yoomoney_{}_{}".format(pc, p))],
+        [InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="pay_stars_{}_{}".format(pc, p))],
+        [InlineKeyboardButton(text="₿ Криптобот", callback_data="pay_crypto_{}_{}".format(pc, p))],
+        [InlineKeyboardButton(text="🪙 GOLD", callback_data="pay_gold_{}_{}".format(pc, p))],
+        [InlineKeyboardButton(text="🎨 NFT", callback_data="pay_nft_{}_{}".format(pc, p))],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_subscription")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def payment_keyboard(payment_url, order_id):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\U0001f4b3 \u041e\u043f\u043b\u0430\u0442\u0438\u0442\u044c \u043a\u0430\u0440\u0442\u043e\u0439", url=payment_url)],
-        [InlineKeyboardButton(text="\u2705 \u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c \u043e\u043f\u043b\u0430\u0442\u0443", callback_data="checkym_{}".format(order_id))],
-        [InlineKeyboardButton(text="\u274c \u041e\u0442\u043c\u0435\u043d\u0430", callback_data="restart")]
+        [InlineKeyboardButton(text="💳 Оплатить картой", url=payment_url)],
+        [InlineKeyboardButton(text="✅ Проверить оплату", callback_data="checkym_{}".format(order_id))],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="restart")]
     ])
 
 
 def crypto_payment_keyboard(invoice_url, order_id):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\u20bf \u041e\u043f\u043b\u0430\u0442\u0438\u0442\u044c \u043a\u0440\u0438\u043f\u0442\u043e\u0439", url=invoice_url)],
-        [InlineKeyboardButton(text="\u2705 \u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c \u043f\u043b\u0430\u0442\u0435\u0436", callback_data="checkcr_{}".format(order_id))],
-        [InlineKeyboardButton(text="\u274c \u041e\u0442\u043c\u0435\u043d\u0430", callback_data="restart")]
+        [InlineKeyboardButton(text="₿ Оплатить криптой", url=invoice_url)],
+        [InlineKeyboardButton(text="✅ Проверить платеж", callback_data="checkcr_{}".format(order_id))],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="restart")]
     ])
 
 
 def support_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\U0001f4ac \u041f\u043e\u0434\u0434\u0435\u0440\u0436\u043a\u0430", url="https://t.me/{}".format(Config.SUPPORT_CHAT_USERNAME))],
-        [InlineKeyboardButton(text="\U0001f504 \u041d\u043e\u0432\u0430\u044f \u043f\u043e\u043a\u0443\u043f\u043a\u0430", callback_data="restart")]
+        [InlineKeyboardButton(text="💬 Поддержка", url="https://t.me/{}".format(Config.SUPPORT_CHAT_USERNAME))],
+        [InlineKeyboardButton(text="🔄 Новая покупка", callback_data="restart")]
     ])
 
 
 def download_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\U0001f4e5 \u0421\u043a\u0430\u0447\u0430\u0442\u044c PMT", url=Config.DOWNLOAD_URL)],
-        [InlineKeyboardButton(text="\U0001f4ac \u041f\u043e\u0434\u0434\u0435\u0440\u0436\u043a\u0430", url="https://t.me/{}".format(Config.SUPPORT_CHAT_USERNAME))],
-        [InlineKeyboardButton(text="\U0001f504 \u041d\u043e\u0432\u0430\u044f \u043f\u043e\u043a\u0443\u043f\u043a\u0430", callback_data="restart")]
+        [InlineKeyboardButton(text="📥 Скачать PMT", url=Config.DOWNLOAD_URL)],
+        [InlineKeyboardButton(text="💬 Поддержка", url="https://t.me/{}".format(Config.SUPPORT_CHAT_USERNAME))],
+        [InlineKeyboardButton(text="🔄 Новая покупка", callback_data="restart")]
     ])
 
 
 def about_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\u25c0\ufe0f \u041d\u0430\u0437\u0430\u0434", callback_data="back_to_start")]
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_start")]
     ])
 
 
 def admin_confirm_keyboard(order_id):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\u2705 \u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u044c", callback_data="admin_confirm_{}".format(order_id))],
-        [InlineKeyboardButton(text="\u274c \u041e\u0442\u043a\u043b\u043e\u043d\u0438\u0442\u044c", callback_data="admin_reject_{}".format(order_id))]
+        [InlineKeyboardButton(text="✅ Подтвердить", callback_data="admin_confirm_{}".format(order_id))],
+        [InlineKeyboardButton(text="❌ Отклонить", callback_data="admin_reject_{}".format(order_id))]
     ])
 
 
 def manual_payment_keyboard(support_url, sent_callback):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\U0001f4ac \u041f\u0435\u0440\u0435\u0439\u0442\u0438 \u043a \u043e\u043f\u043b\u0430\u0442\u0435", url=support_url)],
-        [InlineKeyboardButton(text="\u2705 \u042f \u043d\u0430\u043f\u0438\u0441\u0430\u043b", callback_data=sent_callback)],
-        [InlineKeyboardButton(text="\u274c \u041e\u0442\u043c\u0435\u043d\u0430", callback_data="restart")]
+        [InlineKeyboardButton(text="💬 Перейти к оплате", url=support_url)],
+        [InlineKeyboardButton(text="✅ Я написал", callback_data=sent_callback)],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="restart")]
     ])
 
 
@@ -603,23 +610,42 @@ async def send_admin_notification(user, product, payment_method, price, order_id
 
 
 async def send_start_message(target, state):
-    text = (
-        "\U0001f3af <b>PMT \u2014 \u041f\u0440\u0435\u043c\u0438\u0443\u043c \u0447\u0438\u0442 \u0434\u043b\u044f Standoff 2</b>\n\n"
-        "\u2728 <b>\u0412\u043e\u0437\u043c\u043e\u0436\u043d\u043e\u0441\u0442\u0438:</b>\n"
-        "\U0001f6e1\ufe0f \u041f\u0440\u043e\u0434\u0432\u0438\u043d\u0443\u0442\u0430\u044f \u0437\u0430\u0449\u0438\u0442\u0430 \u043e\u0442 \u0431\u0430\u043d\u043e\u0432\n"
-        "\U0001f3af \u0423\u043c\u043d\u044b\u0439 AimBot \u0441 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430\u043c\u0438\n"
-        "\U0001f441\ufe0f WallHack \u0438 ESP\n"
-        "\U0001f4ca \u041f\u043e\u043b\u043d\u0430\u044f \u0438\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u044f \u043e \u043f\u0440\u043e\u0442\u0438\u0432\u043d\u0438\u043a\u0430\u0445\n"
-        "\u26a1 \u0411\u044b\u0441\u0442\u0440\u044b\u0435 \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u044f\n\n"
-        "\U0001f680 <b>\u041d\u0430\u0436\u043c\u0438\u0442\u0435 \u043a\u043d\u043e\u043f\u043a\u0443 \u043d\u0438\u0436\u0435 \u0434\u043b\u044f \u043f\u043e\u043a\u0443\u043f\u043a\u0438:</b>"
+    new_text = (
+        "PMT | STANDOFF 2 PREMIUM 💰\n\n"
+        "🚀 Универсальное решение:\n"
+        "📱 Android (APK, без Root)\n"
+        "💻 PC\n"
+        "🍏 iOS\n\n"
+        "🔥 Функционал:\n"
+        "• Аимбот + WallHack + ESP\n"
+        "• Анти-бан защита\n\n"
+        "Лучшие цены | Быстрая поддержка 24/7\n\n"
+        "Покупай чит, и разноси своих соперников ⚡️"
     )
+    keyboard = start_keyboard()
+
+    # Пытаемся отправить фото, если файл существует
+    try:
+        photo = FSInputFile(Config.START_IMAGE_PATH)
+    except Exception:
+        # Если файла нет, используем только текст
+        photo = None
+
     if isinstance(target, types.Message):
-        await target.answer(text, reply_markup=start_keyboard())
+        if photo:
+            await target.answer_photo(photo=photo, caption=new_text, reply_markup=keyboard)
+        else:
+            await target.answer(new_text, reply_markup=keyboard)
     elif isinstance(target, types.CallbackQuery):
         try:
-            await target.message.edit_text(text, reply_markup=start_keyboard())
+            await target.message.delete()
         except Exception:
-            await target.message.answer(text, reply_markup=start_keyboard())
+            pass
+        if photo:
+            await target.message.answer_photo(photo=photo, caption=new_text, reply_markup=keyboard)
+        else:
+            await target.message.answer(new_text, reply_markup=keyboard)
+
     await state.set_state(OrderState.main_menu)
 
 
@@ -1086,6 +1112,7 @@ async def main():
     logger.info("ADMIN_IDS: %s", Config.ADMIN_IDS)
     logger.info("SUPPORT: @%s", Config.SUPPORT_CHAT_USERNAME)
     logger.info("DOWNLOAD: %s", Config.DOWNLOAD_URL)
+    logger.info("START IMAGE: %s", Config.START_IMAGE_PATH)
 
     try:
         me = await bot.get_me()
