@@ -609,6 +609,7 @@ async def send_admin_notification(user, product, payment_method, price, order_id
             logger.error("Error sending to admin %s: %s", aid, e)
 
 
+# ========== ИЗМЕНЕННАЯ ФУНКЦИЯ ОТПРАВКИ СТАРТОВОГО СООБЩЕНИЯ С ФОТО ==========
 async def send_start_message(target, state):
     new_text = (
         "PMT | STANDOFF 2 PREMIUM 💰\n\n"
@@ -627,25 +628,25 @@ async def send_start_message(target, state):
     # Пытаемся отправить фото, если файл существует
     try:
         photo = FSInputFile(Config.START_IMAGE_PATH)
+        has_photo = True
     except Exception:
-        # Если файла нет, используем только текст
-        photo = None
+        has_photo = False
 
     if isinstance(target, types.Message):
-        if photo:
+        if has_photo:
             await target.answer_photo(photo=photo, caption=new_text, reply_markup=keyboard)
         else:
             await target.answer(new_text, reply_markup=keyboard)
     elif isinstance(target, types.CallbackQuery):
+        # Удаляем предыдущее сообщение и отправляем новое
         try:
             await target.message.delete()
         except Exception:
             pass
-        if photo:
+        if has_photo:
             await target.message.answer_photo(photo=photo, caption=new_text, reply_markup=keyboard)
         else:
             await target.message.answer(new_text, reply_markup=keyboard)
-
     await state.set_state(OrderState.main_menu)
 
 
@@ -718,6 +719,7 @@ async def about_cheat(callback: types.CallbackQuery):
     await callback.answer()
 
 
+# ========== ИЗМЕНЕННЫЙ ОБРАБОТЧИК ВЫБОРА ПЛАТФОРМЫ (УБРАН ДЛИННЫЙ ТЕКСТ) ==========
 @dp.callback_query(F.data.startswith("platform_"))
 async def process_platform(callback: types.CallbackQuery, state: FSMContext):
     platform = callback.data.split("_")[1]
@@ -725,20 +727,8 @@ async def process_platform(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("\u274c \u041e\u0448\u0438\u0431\u043a\u0430", show_alert=True)
         return
     await state.update_data(platform=platform)
-    info = {
-        "apk": ("\U0001f4f1 <b>PMT Android</b>",
-                "\u2022 Android 10.0+\n\u2022 2 \u0413\u0411 \u043f\u0430\u043c\u044f\u0442\u0438\n\u2022 Root \u043d\u0435 \u043d\u0443\u0436\u0435\u043d",
-                "\u2022 APK \u0444\u0430\u0439\u043b\n\u2022 \u0418\u043d\u0441\u0442\u0440\u0443\u043a\u0446\u0438\u044f\n\u2022 \u041f\u043e\u0434\u0434\u0435\u0440\u0436\u043a\u0430"),
-        "ios": ("\U0001f34e <b>PMT iOS</b>",
-                "\u2022 iOS 14.0 - 18.0\n\u2022 AltStore\n\u2022 Jailbreak \u043d\u0435 \u043d\u0443\u0436\u0435\u043d",
-                "\u2022 IPA \u0444\u0430\u0439\u043b\n\u2022 \u0418\u043d\u0441\u0442\u0440\u0443\u043a\u0446\u0438\u044f\n\u2022 \u041f\u043e\u043c\u043e\u0449\u044c")
-    }
-    title, reqs, incl = info[platform]
-    text = (
-        "{title}\n\n\U0001f527 <b>\u0422\u0440\u0435\u0431\u043e\u0432\u0430\u043d\u0438\u044f:</b>\n{reqs}\n\n"
-        "\U0001f4e6 <b>\u0427\u0442\u043e \u0432\u0445\u043e\u0434\u0438\u0442:</b>\n{incl}\n\n"
-        "\U0001f4b0 <b>\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0442\u0430\u0440\u0438\u0444:</b>"
-    ).format(title=title, reqs=reqs, incl=incl)
+    # Новый короткий текст
+    text = "💰 <b>Выберите тариф:</b>"
     await callback.message.edit_text(text, reply_markup=subscription_keyboard(platform))
     await state.set_state(OrderState.choosing_subscription)
     await callback.answer()
