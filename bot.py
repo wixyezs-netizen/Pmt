@@ -1,7 +1,8 @@
-# app.py — PMT Premium Cheat Shop: Bot + MiniApp (single file)
+# bot.py — PMT Premium Cheat Shop: Bot + MiniApp (single file, no Flask)
 import logging
 import asyncio
 import aiohttp
+from aiohttp import web
 import hashlib
 import hmac
 import time
@@ -14,7 +15,6 @@ from urllib.parse import parse_qs, unquote, quote
 from collections import OrderedDict
 from typing import Optional, Dict, Any, Union
 
-from flask import Flask, request, jsonify, Response
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -41,6 +41,7 @@ class Config:
     DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://go.linkify.ru/2GPF")
     WEBAPP_DOMAIN = os.environ.get("WEBAPP_DOMAIN", "pmt.bothost.tech")
     WEBAPP_URL = f"https://{WEBAPP_DOMAIN}"
+    WEBAPP_PORT = int(os.environ.get("PORT", os.environ.get("WEBAPP_PORT", "8080")))
     ADMIN_IDS = set()
     ADMIN_ID = 0
     SUPPORT_CHAT_ID = 0
@@ -99,10 +100,6 @@ class OrderStorage:
         async with self._lock:
             return order_id in self._confirmed
 
-    async def get_confirmed(self, order_id):
-        async with self._lock:
-            return self._confirmed.get(order_id)
-
     async def remove_pending(self, order_id):
         async with self._lock:
             return self._pending.pop(order_id, None)
@@ -143,6 +140,8 @@ PRODUCTS = {
     "ios_forever": {"name": "🍎 PMT iOS", "period_text": "НАВСЕГДА", "price": 1400, "price_stars": 1400, "price_gold": 2500, "price_nft": 2200, "price_crypto_usdt": 18, "platform": "iOS", "period": "НАВСЕГДА", "platform_code": "ios", "emoji": "🍎", "duration": "Навсегда"},
 }
 
+PRODUCTS_JSON = json.dumps(PRODUCTS, ensure_ascii=False)
+
 # ========== ВСПОМОГАТЕЛЬНЫЕ ==========
 def generate_order_id():
     raw = f"{time.time()}_{random.randint(100000,999999)}_{os.urandom(4).hex()}"
@@ -168,24 +167,6 @@ def find_product_by_id(product_id):
 def create_payment_link(amount, order_id, product_name):
     comment = f"Заказ {order_id}: {product_name}"
     return f"https://yoomoney.ru/quickpay/confirm.xml?receiver={Config.YOOMONEY_WALLET}&quickpay-form=shop&targets={quote(comment,safe='')}&sum={amount}&label={order_id}&successURL={quote('https://t.me/pmt_bot?start=success',safe='')}&paymentType=AC"
-
-def validate_webapp_data(init_data_raw):
-    try:
-        parsed = dict(parse_qs(init_data_raw))
-        parsed = {k: v[0] for k, v in parsed.items()}
-        check_hash = parsed.pop('hash', None)
-        if not check_hash:
-            return None
-        data_check = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
-        secret_key = hmac.new(b"WebAppData", Config.BOT_TOKEN.encode(), hashlib.sha256).digest()
-        computed = hmac.new(secret_key, data_check.encode(), hashlib.sha256).hexdigest()
-        if computed == check_hash:
-            user_data = json.loads(parsed.get('user', '{}'))
-            return user_data
-        return None
-    except Exception as e:
-        logger.error("Validate webapp data error: %s", e)
-        return None
 
 # ========== ПЛАТЁЖНЫЕ СЕРВИСЫ ==========
 class YooMoneyService:
@@ -274,8 +255,6 @@ dp = Dispatcher(storage=storage)
 orders = OrderStorage(max_pending=Config.MAX_PENDING_ORDERS, expiry_seconds=Config.ORDER_EXPIRY_SECONDS)
 rate_limiter = RateLimiter(interval=Config.RATE_LIMIT_SECONDS)
 
-bot_loop = None
-
 # ========== СОСТОЯНИЯ ==========
 class OrderState(StatesGroup):
     main_menu = State()
@@ -311,9 +290,9 @@ async def process_successful_payment(order_id, source="API"):
 
 💫 <b>Активация:</b>
 1️⃣ Скачайте файл
-2️⃣ Установите приложение
+2️⃣ Установите
 3️⃣ Введите ключ
-4️⃣ Наслаждайтесь игрой! 🎮
+4️⃣ Наслаждайтесь! 🎮
 
 💬 Поддержка: @{Config.SUPPORT_CHAT_USERNAME}"""
 
@@ -327,7 +306,7 @@ async def process_successful_payment(order_id, source="API"):
         logger.error("Send to user %s: %s", user_id, e)
 
     now_str = datetime.now().strftime('%d.%m.%Y %H:%M')
-    admin_text = f"""💎 <b>НОВАЯ ПРОДАЖА ({source})</b>
+    admin_text = f"""💎 <b>ПРОДАЖА ({source})</b>
 
 👤 {order['user_name']}
 🆔 {user_id}
@@ -416,13 +395,16 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
 Лучшие цены | Быстрая поддержка 24/7
 
-Покупай чит, и разноси своих соперников ⚡️"""
+Покупай чит, и разноси соперников ⚡️"""
     await message.answer(text, reply_markup=start_keyboard())
     await state.set_state(OrderState.main_menu)
 
 @dp.callback_query(F.data == "buy_cheat")
 async def buy_cheat(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("💰 <b>Выберите платформу:</b>\n\n📱 <b>Android</b> — APK файл\n🍏 <b>iOS</b> — IPA файл", reply_markup=platform_keyboard())
+    try:
+        await callback.message.edit_text("💰 <b>Выберите платформу:</b>\n\n📱 <b>Android</b> — APK\n🍏 <b>iOS</b> — IPA", reply_markup=platform_keyboard())
+    except:
+        await callback.message.answer("💰 <b>Выберите платформу:</b>\n\n📱 <b>Android</b> — APK\n🍏 <b>iOS</b> — IPA", reply_markup=platform_keyboard())
     await state.set_state(OrderState.choosing_platform)
     await callback.answer()
 
@@ -445,17 +427,23 @@ async def about_cheat(callback: types.CallbackQuery):
 • Регулярные обновления
 
 💬 Поддержка: @{Config.SUPPORT_CHAT_USERNAME}"""
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_start")]]))
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_start")]]))
+    except:
+        pass
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("platform_"))
 async def process_platform(callback: types.CallbackQuery, state: FSMContext):
     platform = callback.data.split("_")[1]
     if platform not in ("apk", "ios"):
-        await callback.answer("❌ Ошибка", show_alert=True)
+        await callback.answer("❌", show_alert=True)
         return
     await state.update_data(platform=platform)
-    await callback.message.edit_text("💰 <b>Выберите тариф:</b>", reply_markup=subscription_keyboard(platform))
+    try:
+        await callback.message.edit_text("💰 <b>Выберите тариф:</b>", reply_markup=subscription_keyboard(platform))
+    except:
+        pass
     await state.set_state(OrderState.choosing_subscription)
     await callback.answer()
 
@@ -482,10 +470,14 @@ async def process_subscription(callback: types.CallbackQuery, state: FSMContext)
 🎨 NFT: {product['price_nft']} 🖼️
 
 🎯 <b>Способ оплаты:</b>"""
-    await callback.message.edit_text(text, reply_markup=payment_methods_keyboard(product))
+    try:
+        await callback.message.edit_text(text, reply_markup=payment_methods_keyboard(product))
+    except:
+        pass
     await state.set_state(OrderState.choosing_payment)
     await callback.answer()
 
+# ========== ОПЛАТА КАРТОЙ ==========
 @dp.callback_query(F.data.startswith("pay_yoomoney_"))
 async def process_yoomoney_payment(callback: types.CallbackQuery):
     parts = callback.data.split("_")
@@ -516,10 +508,14 @@ async def process_yoomoney_payment(callback: types.CallbackQuery):
         [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"checkym_{order_id}")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="restart")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except:
+        pass
     await send_admin_notification(callback.from_user, product, "💳 Картой", f"{amount} ₽", order_id)
     await callback.answer()
 
+# ========== ПРОВЕРКА ЮMONEY ==========
 @dp.callback_query(F.data.startswith("checkym_"))
 async def check_yoomoney_callback(callback: types.CallbackQuery):
     order_id = callback.data.replace("checkym_", "", 1)
@@ -534,7 +530,10 @@ async def check_yoomoney_callback(callback: types.CallbackQuery):
         await callback.answer("⏳ Подождите...", show_alert=True)
         return
     await callback.answer("🔍 Проверяем...")
-    checking_msg = await callback.message.edit_text("🔄 <b>Проверка платежа...</b>\n⏳ Подождите 15-25 секунд...")
+    try:
+        checking_msg = await callback.message.edit_text("🔄 <b>Проверка платежа...</b>\n⏳ Подождите 15-25 секунд...")
+    except:
+        checking_msg = callback.message
     payment_found = False
     for _ in range(Config.MAX_PAYMENT_CHECK_ATTEMPTS):
         payment_found = await YooMoneyService.check_payment(order_id, order["amount"], order.get("created_at", time.time()))
@@ -544,9 +543,15 @@ async def check_yoomoney_callback(callback: types.CallbackQuery):
     if payment_found:
         success = await process_successful_payment(order_id, "Автопроверка")
         if success:
-            await checking_msg.edit_text("✅ <b>Платеж найден!</b>\n📨 Проверьте сообщение ⬆️")
+            try:
+                await checking_msg.edit_text("✅ <b>Платеж найден!</b>\n📨 Проверьте сообщение ⬆️")
+            except:
+                pass
         else:
-            await checking_msg.edit_text("✅ Уже обработан")
+            try:
+                await checking_msg.edit_text("✅ Уже обработан")
+            except:
+                pass
     else:
         product = order['product']
         payment_url = create_payment_link(order["amount"], order_id, f"{product['name']} ({product['duration']})")
@@ -555,8 +560,12 @@ async def check_yoomoney_callback(callback: types.CallbackQuery):
             [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"checkym_{order_id}")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="restart")]
         ])
-        await checking_msg.edit_text(f"⏳ <b>Платеж не найден</b>\n\n💰 {order['amount']} ₽\n🆔 <code>{order_id}</code>\n\n⏰ Попробуйте через 1-2 мин", reply_markup=kb)
+        try:
+            await checking_msg.edit_text(f"⏳ <b>Платеж не найден</b>\n\n💰 {order['amount']} ₽\n🆔 <code>{order_id}</code>\n\n⏰ Попробуйте через 1-2 мин", reply_markup=kb)
+        except:
+            pass
 
+# ========== ОПЛАТА STARS ==========
 @dp.callback_query(F.data.startswith("pay_stars_"))
 async def process_stars_payment(callback: types.CallbackQuery):
     parts = callback.data.split("_")
@@ -588,6 +597,7 @@ async def successful_payment(message: types.Message):
     if payload.startswith("stars_"):
         await process_successful_payment(payload.replace("stars_", "", 1), "Telegram Stars")
 
+# ========== ОПЛАТА КРИПТО ==========
 @dp.callback_query(F.data.startswith("pay_crypto_"))
 async def process_crypto_payment(callback: types.CallbackQuery):
     if not Config.CRYPTOBOT_TOKEN:
@@ -621,10 +631,13 @@ async def process_crypto_payment(callback: types.CallbackQuery):
 3️⃣ Нажмите «Проверить»"""
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="₿ Оплатить криптой", url=invoice_data["pay_url"])],
-        [InlineKeyboardButton(text="✅ Проверить платеж", callback_data=f"checkcr_{order_id}")],
+        [InlineKeyboardButton(text="✅ Проверить", callback_data=f"checkcr_{order_id}")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="restart")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except:
+        pass
     await send_admin_notification(callback.from_user, product, "₿ CryptoBot", f"{amount_usdt} USDT", order_id)
     await callback.answer()
 
@@ -648,10 +661,14 @@ async def check_crypto_callback(callback: types.CallbackQuery):
     if await CryptoBotService.check_invoice(invoice_id):
         success = await process_successful_payment(order_id, "CryptoBot")
         if success:
-            await callback.message.edit_text("✅ <b>Криптоплатеж подтвержден!</b>\n📨 Ключ отправлен ⬆️")
+            try:
+                await callback.message.edit_text("✅ <b>Криптоплатеж подтвержден!</b>\n📨 Ключ отправлен ⬆️")
+            except:
+                pass
     else:
         await callback.answer("⏳ Не подтвержден. Попробуйте через минуту.", show_alert=True)
 
+# ========== GOLD / NFT ==========
 @dp.callback_query(F.data.startswith("pay_gold_"))
 async def process_gold_payment(callback: types.CallbackQuery):
     await _process_manual_payment(callback, "gold")
@@ -686,10 +703,13 @@ async def _process_manual_payment(callback, method):
 2️⃣ Ожидайте обработки"""
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💬 Перейти к оплате", url=support_url)],
-        [InlineKeyboardButton(text=f"✅ Я написал", callback_data=f"{method}_sent")],
+        [InlineKeyboardButton(text="✅ Я написал", callback_data=f"{method}_sent")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="restart")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except:
+        pass
     await send_admin_notification(callback.from_user, product, f"{cfg['icon']} {cfg['name']}", f"{price} {cfg['name']}", order_id)
     await callback.answer()
 
@@ -707,9 +727,13 @@ async def manual_payment_sent(callback: types.CallbackQuery):
         [InlineKeyboardButton(text="💬 Поддержка", url=f"https://t.me/{Config.SUPPORT_CHAT_USERNAME}")],
         [InlineKeyboardButton(text="🔄 Новая покупка", callback_data="restart")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except:
+        pass
     await callback.answer()
 
+# ========== АДМИН ==========
 @dp.callback_query(F.data.startswith("admin_confirm_"))
 async def admin_confirm(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -718,7 +742,10 @@ async def admin_confirm(callback: types.CallbackQuery):
     order_id = callback.data.replace("admin_confirm_", "", 1)
     success = await process_successful_payment(order_id, "👨‍💼 Админ")
     if success:
-        await callback.message.edit_text(f"✅ <b>Подтверждён</b>\n🆔 {order_id}\n👨‍💼 {callback.from_user.full_name}")
+        try:
+            await callback.message.edit_text(f"✅ <b>Подтверждён</b>\n🆔 {order_id}\n👨‍💼 {callback.from_user.full_name}")
+        except:
+            pass
         await callback.answer("✅")
     else:
         await callback.answer("❌ Не найден", show_alert=True)
@@ -731,7 +758,10 @@ async def admin_reject(callback: types.CallbackQuery):
     order_id = callback.data.replace("admin_reject_", "", 1)
     order = await orders.remove_pending(order_id)
     if order:
-        await callback.message.edit_text(f"❌ <b>Отклонён</b>\n🆔 {order_id}")
+        try:
+            await callback.message.edit_text(f"❌ <b>Отклонён</b>\n🆔 {order_id}")
+        except:
+            pass
         try:
             await bot.send_message(order['user_id'], f"❌ <b>Заказ отклонён</b>\n💬 @{Config.SUPPORT_CHAT_USERNAME}")
         except:
@@ -753,6 +783,7 @@ async def cmd_orders(message: types.Message):
         text += f"💰 Баланс: {balance} ₽"
     await message.answer(text)
 
+# ========== НАВИГАЦИЯ ==========
 @dp.callback_query(F.data == "restart")
 async def restart_order(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
@@ -769,7 +800,7 @@ async def restart_order(callback: types.CallbackQuery, state: FSMContext):
 
 Лучшие цены | Быстрая поддержка 24/7
 
-Покупай чит, и разноси своих соперников ⚡️"""
+Покупай чит, и разноси соперников ⚡️"""
     try:
         await callback.message.edit_text(text, reply_markup=start_keyboard())
     except:
@@ -784,11 +815,14 @@ async def back_to_start(callback: types.CallbackQuery, state: FSMContext):
 async def back_to_subscription(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     platform = data.get("platform", "apk")
-    await callback.message.edit_text("💰 <b>Выберите тариф:</b>", reply_markup=subscription_keyboard(platform))
+    try:
+        await callback.message.edit_text("💰 <b>Выберите тариф:</b>", reply_markup=subscription_keyboard(platform))
+    except:
+        pass
     await state.set_state(OrderState.choosing_subscription)
     await callback.answer()
 
-# Обработка данных из MiniApp
+# ========== WEBAPP DATA ==========
 @dp.message(F.web_app_data)
 async def handle_webapp_data(message: types.Message):
     try:
@@ -807,19 +841,19 @@ async def handle_webapp_data(message: types.Message):
             if payment_method == "card":
                 amount = product["price"]
                 payment_url = create_payment_link(amount, order_id, f"{product['name']} ({product['duration']})")
-                await orders.add_pending(order_id, {"user_id": user.id, "user_name": user.full_name, "product": product, "amount": amount, "currency": "₽", "payment_method": "Картой", "status": "pending", "created_at": time.time()})
+                await orders.add_pending(order_id, {"user_id": user.id, "user_name": user.full_name, "product": product, "amount": amount, "currency": "₽", "payment_method": "Картой (MiniApp)", "status": "pending", "created_at": time.time()})
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="💳 Оплатить картой", url=payment_url)],
                     [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"checkym_{order_id}")],
                     [InlineKeyboardButton(text="❌ Отмена", callback_data="restart")]
                 ])
                 await message.answer(f"💳 <b>Оплата картой</b>\n\n{product['emoji']} {product['name']}\n⏱️ {product['duration']}\n💰 <b>{amount} ₽</b>\n🆔 <code>{order_id}</code>", reply_markup=kb)
-                await send_admin_notification(user, product, "💳 Картой", f"{amount} ₽", order_id)
+                await send_admin_notification(user, product, "💳 Картой (MiniApp)", f"{amount} ₽", order_id)
 
             elif payment_method == "stars":
-                await orders.add_pending(order_id, {"user_id": user.id, "user_name": user.full_name, "product": product, "amount": product['price_stars'], "currency": "⭐", "payment_method": "Telegram Stars", "status": "pending", "created_at": time.time()})
+                await orders.add_pending(order_id, {"user_id": user.id, "user_name": user.full_name, "product": product, "amount": product['price_stars'], "currency": "⭐", "payment_method": "Stars (MiniApp)", "status": "pending", "created_at": time.time()})
                 await bot.send_invoice(chat_id=user.id, title=f"PMT — {product['name']}", description=f"Подписка на {product['duration']} для {product['platform']}", payload=f"stars_{order_id}", provider_token="", currency="XTR", prices=[LabeledPrice(label="XTR", amount=product['price_stars'])], start_parameter="pmt_payment")
-                await send_admin_notification(user, product, "⭐ Stars", f"{product['price_stars']} ⭐", order_id)
+                await send_admin_notification(user, product, "⭐ Stars (MiniApp)", f"{product['price_stars']} ⭐", order_id)
 
             elif payment_method == "crypto":
                 amount_usdt = product["price_crypto_usdt"]
@@ -827,1095 +861,402 @@ async def handle_webapp_data(message: types.Message):
                 if not invoice_data:
                     await message.answer("❌ Ошибка создания инвойса")
                     return
-                await orders.add_pending(order_id, {"user_id": user.id, "user_name": user.full_name, "product": product, "amount": amount_usdt, "currency": "USDT", "payment_method": "CryptoBot", "status": "pending", "invoice_id": invoice_data["invoice_id"], "created_at": time.time()})
+                await orders.add_pending(order_id, {"user_id": user.id, "user_name": user.full_name, "product": product, "amount": amount_usdt, "currency": "USDT", "payment_method": "CryptoBot (MiniApp)", "status": "pending", "invoice_id": invoice_data["invoice_id"], "created_at": time.time()})
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="₿ Оплатить криптой", url=invoice_data["pay_url"])],
-                    [InlineKeyboardButton(text="✅ Проверить платеж", callback_data=f"checkcr_{order_id}")],
+                    [InlineKeyboardButton(text="✅ Проверить", callback_data=f"checkcr_{order_id}")],
                     [InlineKeyboardButton(text="❌ Отмена", callback_data="restart")]
                 ])
                 await message.answer(f"₿ <b>Криптооплата</b>\n\n{product['emoji']} {product['name']}\n⏱️ {product['duration']}\n💰 <b>{amount_usdt} USDT</b>\n🆔 <code>{order_id}</code>", reply_markup=kb)
-                await send_admin_notification(user, product, "₿ CryptoBot", f"{amount_usdt} USDT", order_id)
+                await send_admin_notification(user, product, "₿ CryptoBot (MiniApp)", f"{amount_usdt} USDT", order_id)
 
             elif payment_method in ("gold", "nft"):
                 cfg = {"gold": {"name": "GOLD", "icon": "💰", "price_key": "price_gold"}, "nft": {"name": "NFT", "icon": "🎨", "price_key": "price_nft"}}[payment_method]
                 price = product[cfg["price_key"]]
-                chat_message = f"Привет! Хочу купить чит PMT на Standoff 2. Подписка на {product['period_text']} ({product['platform']}). Готов купить за {price} {cfg['name']}"
-                support_url = f"https://t.me/{Config.SUPPORT_CHAT_USERNAME}?text={quote(chat_message, safe='')}"
-                await orders.add_pending(order_id, {"user_id": user.id, "user_name": user.full_name, "product": product, "amount": price, "currency": cfg["name"], "payment_method": cfg["name"], "status": "pending", "created_at": time.time()})
+                chat_msg = f"Привет! Хочу купить чит PMT. {product['period_text']} ({product['platform']}). За {price} {cfg['name']}"
+                support_url = f"https://t.me/{Config.SUPPORT_CHAT_USERNAME}?text={quote(chat_msg, safe='')}"
+                await orders.add_pending(order_id, {"user_id": user.id, "user_name": user.full_name, "product": product, "amount": price, "currency": cfg["name"], "payment_method": f"{cfg['name']} (MiniApp)", "status": "pending", "created_at": time.time()})
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="💬 Перейти к оплате", url=support_url)],
                     [InlineKeyboardButton(text="❌ Отмена", callback_data="restart")]
                 ])
                 await message.answer(f"{cfg['icon']} <b>Оплата {cfg['name']}</b>\n\n{product['emoji']} {product['name']}\n⏱️ {product['duration']}\n💰 <b>{price} {cfg['name']}</b>", reply_markup=kb)
-                await send_admin_notification(user, product, f"{cfg['icon']} {cfg['name']}", f"{price} {cfg['name']}", order_id)
+                await send_admin_notification(user, product, f"{cfg['icon']} {cfg['name']} (MiniApp)", f"{price} {cfg['name']}", order_id)
     except Exception as e:
         logger.error("WebApp data error: %s", e)
         await message.answer("❌ Ошибка обработки заказа")
 
 
 # =============================================
-# ============ FLASK MINIAPP =================
+# ========== MINIAPP HTML (aiohttp) ===========
 # =============================================
-flask_app = Flask(__name__)
 
-MINIAPP_HTML = '''<!DOCTYPE html>
+MINIAPP_HTML = """<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>PMT Premium Shop</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-* {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-    -webkit-tap-highlight-color: transparent;
-}
-
-:root {
-    --bg-primary: #0a0a1a;
-    --bg-secondary: #111128;
-    --bg-card: #161640;
-    --bg-card-hover: #1c1c50;
-    --accent-primary: #6c5ce7;
-    --accent-secondary: #a29bfe;
-    --accent-glow: rgba(108, 92, 231, 0.3);
-    --accent-gold: #ffd700;
-    --accent-green: #00e676;
-    --accent-red: #ff5252;
-    --accent-cyan: #00e5ff;
-    --text-primary: #ffffff;
-    --text-secondary: #b8b8d4;
-    --text-muted: #6b6b8d;
-    --border-color: rgba(108, 92, 231, 0.2);
-    --gradient-primary: linear-gradient(135deg, #6c5ce7 0%, #a29bfe 100%);
-    --gradient-gold: linear-gradient(135deg, #f5af19 0%, #f12711 100%);
-    --gradient-bg: linear-gradient(180deg, #0a0a1a 0%, #0d0d2b 50%, #111128 100%);
-}
-
-@font-face {
-    font-family: 'Inter';
-    src: url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
-}
-
-body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    background: var(--gradient-bg);
-    color: var(--text-primary);
-    min-height: 100vh;
-    overflow-x: hidden;
-    position: relative;
-}
-
-/* ===== ANIMATED BACKGROUND ===== */
-.bg-animation {
-    position: fixed;
-    top: 0; left: 0;
-    width: 100%; height: 100%;
-    z-index: 0;
-    overflow: hidden;
-    pointer-events: none;
-}
-
-.bg-animation .orb {
-    position: absolute;
-    border-radius: 50%;
-    filter: blur(80px);
-    opacity: 0.15;
-    animation: floatOrb 20s ease-in-out infinite;
-}
-
-.bg-animation .orb:nth-child(1) {
-    width: 400px; height: 400px;
-    background: #6c5ce7;
-    top: -100px; left: -100px;
-    animation-delay: 0s;
-    animation-duration: 25s;
-}
-
-.bg-animation .orb:nth-child(2) {
-    width: 300px; height: 300px;
-    background: #00e5ff;
-    top: 50%; right: -80px;
-    animation-delay: -5s;
-    animation-duration: 20s;
-}
-
-.bg-animation .orb:nth-child(3) {
-    width: 350px; height: 350px;
-    background: #f12711;
-    bottom: -100px; left: 30%;
-    animation-delay: -10s;
-    animation-duration: 30s;
-}
-
-.bg-animation .orb:nth-child(4) {
-    width: 250px; height: 250px;
-    background: #ffd700;
-    top: 30%; left: 50%;
-    animation-delay: -7s;
-    animation-duration: 22s;
-}
-
-@keyframes floatOrb {
-    0%, 100% { transform: translate(0, 0) scale(1); }
-    25% { transform: translate(80px, -60px) scale(1.1); }
-    50% { transform: translate(-40px, 80px) scale(0.9); }
-    75% { transform: translate(60px, 40px) scale(1.05); }
-}
-
-/* Grid pattern overlay */
-.bg-grid {
-    position: fixed;
-    top: 0; left: 0;
-    width: 100%; height: 100%;
-    z-index: 0;
-    pointer-events: none;
-    background-image:
-        linear-gradient(rgba(108, 92, 231, 0.03) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(108, 92, 231, 0.03) 1px, transparent 1px);
-    background-size: 40px 40px;
-}
-
-/* Particles */
-.particles {
-    position: fixed;
-    top: 0; left: 0;
-    width: 100%; height: 100%;
-    z-index: 0;
-    pointer-events: none;
-}
-
-.particle {
-    position: absolute;
-    width: 3px; height: 3px;
-    background: var(--accent-secondary);
-    border-radius: 50%;
-    opacity: 0;
-    animation: particleFloat 8s ease-in-out infinite;
-}
-
-@keyframes particleFloat {
-    0% { opacity: 0; transform: translateY(100vh) scale(0); }
-    10% { opacity: 0.6; }
-    90% { opacity: 0.6; }
-    100% { opacity: 0; transform: translateY(-20px) scale(1); }
-}
-
-/* ===== MAIN CONTAINER ===== */
-.app-container {
-    position: relative;
-    z-index: 1;
-    max-width: 480px;
-    margin: 0 auto;
-    padding: 16px;
-    padding-bottom: 100px;
-}
-
-/* ===== HEADER ===== */
-.header {
-    text-align: center;
-    padding: 32px 20px 24px;
-    position: relative;
-}
-
-.logo-container {
-    position: relative;
-    display: inline-block;
-    margin-bottom: 16px;
-}
-
-.logo-glow {
-    position: absolute;
-    top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    width: 120px; height: 120px;
-    background: var(--accent-primary);
-    border-radius: 50%;
-    filter: blur(40px);
-    opacity: 0.4;
-    animation: logoGlow 3s ease-in-out infinite alternate;
-}
-
-@keyframes logoGlow {
-    0% { opacity: 0.3; transform: translate(-50%, -50%) scale(0.8); }
-    100% { opacity: 0.6; transform: translate(-50%, -50%) scale(1.2); }
-}
-
-.logo-icon {
-    position: relative;
-    width: 80px; height: 80px;
-    background: var(--gradient-primary);
-    border-radius: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 40px;
-    box-shadow: 0 8px 32px rgba(108, 92, 231, 0.4);
-    animation: logoFloat 4s ease-in-out infinite;
-}
-
-@keyframes logoFloat {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-8px); }
-}
-
-.header h1 {
-    font-size: 28px;
-    font-weight: 800;
-    background: linear-gradient(135deg, #fff 0%, #a29bfe 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    letter-spacing: -0.5px;
-}
-
-.header .subtitle {
-    font-size: 14px;
-    color: var(--text-secondary);
-    margin-top: 6px;
-    font-weight: 400;
-}
-
-.header .badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: rgba(0, 230, 118, 0.1);
-    border: 1px solid rgba(0, 230, 118, 0.3);
-    color: var(--accent-green);
-    padding: 6px 16px;
-    border-radius: 20px;
-    font-size: 12px;
-    font-weight: 600;
-    margin-top: 12px;
-}
-
-.badge .pulse-dot {
-    width: 8px; height: 8px;
-    background: var(--accent-green);
-    border-radius: 50%;
-    animation: pulseDot 2s ease-in-out infinite;
-}
-
-@keyframes pulseDot {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.5; transform: scale(0.7); }
-}
-
-/* ===== FEATURES BAR ===== */
-.features-bar {
-    display: flex;
-    gap: 8px;
-    overflow-x: auto;
-    padding: 4px 0 16px;
-    scrollbar-width: none;
-    -ms-overflow-style: none;
-}
-
-.features-bar::-webkit-scrollbar { display: none; }
-
-.feature-chip {
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    padding: 8px 14px;
-    border-radius: 12px;
-    font-size: 12px;
-    color: var(--text-secondary);
-    font-weight: 500;
-    white-space: nowrap;
-    transition: all 0.3s;
-}
-
-.feature-chip:hover {
-    border-color: var(--accent-primary);
-    background: var(--bg-card-hover);
-}
-
-.feature-chip .icon { font-size: 14px; }
-
-/* ===== SECTION TITLE ===== */
-.section-title {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin: 24px 0 16px;
-    padding: 0 4px;
-}
-
-.section-title .line {
-    flex: 1;
-    height: 1px;
-    background: linear-gradient(90deg, var(--border-color) 0%, transparent 100%);
-}
-
-.section-title .line:last-child {
-    background: linear-gradient(90deg, transparent 0%, var(--border-color) 100%);
-}
-
-.section-title span {
-    font-size: 13px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 2px;
-    color: var(--text-muted);
-}
-
-/* ===== PLATFORM TABS ===== */
-.platform-tabs {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 20px;
-}
-
-.platform-tab {
-    flex: 1;
-    padding: 14px 16px;
-    background: var(--bg-card);
-    border: 2px solid var(--border-color);
-    border-radius: 16px;
-    text-align: center;
-    cursor: pointer;
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    position: relative;
-    overflow: hidden;
-}
-
-.platform-tab::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0;
-    width: 100%; height: 100%;
-    background: var(--gradient-primary);
-    opacity: 0;
-    transition: opacity 0.3s;
-}
-
-.platform-tab.active {
-    border-color: var(--accent-primary);
-    box-shadow: 0 4px 20px var(--accent-glow);
-}
-
-.platform-tab.active::before { opacity: 0.1; }
-
-.platform-tab .tab-icon {
-    font-size: 28px;
-    display: block;
-    margin-bottom: 6px;
-    position: relative;
-    z-index: 1;
-}
-
-.platform-tab .tab-label {
-    font-size: 13px;
-    font-weight: 700;
-    position: relative;
-    z-index: 1;
-    color: var(--text-secondary);
-}
-
-.platform-tab.active .tab-label { color: var(--text-primary); }
-
-/* ===== PRODUCT CARDS ===== */
-.products-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-}
-
-.product-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 20px;
-    padding: 20px;
-    position: relative;
-    overflow: hidden;
-    cursor: pointer;
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    transform: translateY(0);
-}
-
-.product-card:hover {
-    transform: translateY(-2px);
-    border-color: var(--accent-primary);
-    box-shadow: 0 8px 30px var(--accent-glow);
-}
-
-.product-card.selected {
-    border-color: var(--accent-primary);
-    box-shadow: 0 4px 24px var(--accent-glow);
-    background: var(--bg-card-hover);
-}
-
-.product-card .card-glow {
-    position: absolute;
-    top: -50%; right: -50%;
-    width: 200px; height: 200px;
-    background: var(--accent-primary);
-    border-radius: 50%;
-    filter: blur(80px);
-    opacity: 0;
-    transition: opacity 0.5s;
-    pointer-events: none;
-}
-
-.product-card.selected .card-glow,
-.product-card:hover .card-glow { opacity: 0.08; }
-
-.product-card .popular-badge {
-    position: absolute;
-    top: 12px; right: 12px;
-    background: var(--gradient-gold);
-    color: #000;
-    padding: 4px 10px;
-    border-radius: 8px;
-    font-size: 10px;
-    font-weight: 800;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-}
-
-.product-card .card-header {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    margin-bottom: 14px;
-}
-
-.card-header .period-icon {
-    width: 48px; height: 48px;
-    border-radius: 14px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 24px;
-    flex-shrink: 0;
-}
-
-.card-header .period-icon.week { background: rgba(0, 229, 255, 0.15); }
-.card-header .period-icon.month { background: rgba(108, 92, 231, 0.15); }
-.card-header .period-icon.forever { background: rgba(255, 215, 0, 0.15); }
-
-.card-header .card-info h3 {
-    font-size: 16px;
-    font-weight: 700;
-    color: var(--text-primary);
-}
-
-.card-header .card-info .duration {
-    font-size: 12px;
-    color: var(--text-secondary);
-    margin-top: 2px;
-}
-
-.card-prices {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 8px;
-    margin-top: 12px;
-}
-
-.price-tag {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    background: rgba(255,255,255,0.03);
-    padding: 8px 10px;
-    border-radius: 10px;
-    font-size: 13px;
-    font-weight: 600;
-}
-
-.price-tag .price-icon { font-size: 14px; }
-.price-tag.main-price {
-    grid-column: 1 / -1;
-    background: rgba(108, 92, 231, 0.1);
-    border: 1px solid rgba(108, 92, 231, 0.2);
-    font-size: 18px;
-    font-weight: 800;
-    justify-content: center;
-    padding: 12px;
-    color: var(--accent-secondary);
-}
-
-/* ===== PAYMENT SECTION ===== */
-.payment-section {
-    display: none;
-    animation: slideUp 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.payment-section.visible { display: block; }
-
-@keyframes slideUp {
-    from { opacity: 0; transform: translateY(20px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-
-.payment-methods {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-
-.payment-btn {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 16px;
-    padding: 16px 18px;
-    cursor: pointer;
-    transition: all 0.3s;
-    color: var(--text-primary);
-    width: 100%;
-    font-family: inherit;
-    font-size: 15px;
-    font-weight: 600;
-}
-
-.payment-btn:hover,
-.payment-btn:active {
-    border-color: var(--accent-primary);
-    background: var(--bg-card-hover);
-    transform: scale(0.98);
-}
-
-.payment-btn .pay-icon {
-    width: 44px; height: 44px;
-    border-radius: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 22px;
-    flex-shrink: 0;
-}
-
-.payment-btn .pay-icon.card { background: rgba(108, 92, 231, 0.15); }
-.payment-btn .pay-icon.stars { background: rgba(255, 193, 7, 0.15); }
-.payment-btn .pay-icon.crypto { background: rgba(0, 229, 255, 0.15); }
-.payment-btn .pay-icon.gold { background: rgba(255, 215, 0, 0.15); }
-.payment-btn .pay-icon.nft { background: rgba(233, 30, 99, 0.15); }
-
-.payment-btn .pay-info {
-    flex: 1;
-    text-align: left;
-}
-
-.payment-btn .pay-info .pay-name { font-weight: 600; }
-.payment-btn .pay-info .pay-price {
-    font-size: 12px;
-    color: var(--text-secondary);
-    margin-top: 2px;
-}
-
-.payment-btn .pay-arrow {
-    color: var(--text-muted);
-    font-size: 18px;
-}
-
-/* ===== SELECTED PRODUCT SUMMARY ===== */
-.selected-summary {
-    display: none;
-    background: linear-gradient(135deg, rgba(108, 92, 231, 0.1) 0%, rgba(162, 155, 254, 0.05) 100%);
-    border: 1px solid rgba(108, 92, 231, 0.3);
-    border-radius: 16px;
-    padding: 16px;
-    margin-bottom: 16px;
-    animation: slideUp 0.3s ease;
-}
-
-.selected-summary.visible { display: flex; align-items: center; gap: 12px; }
-
-.selected-summary .sum-icon {
-    font-size: 32px;
-}
-
-.selected-summary .sum-info h4 {
-    font-size: 15px;
-    font-weight: 700;
-}
-
-.selected-summary .sum-info p {
-    font-size: 12px;
-    color: var(--text-secondary);
-    margin-top: 2px;
-}
-
-/* ===== FOOTER INFO ===== */
-.footer-info {
-    text-align: center;
-    padding: 24px 0;
-    color: var(--text-muted);
-    font-size: 12px;
-}
-
-.footer-info a {
-    color: var(--accent-secondary);
-    text-decoration: none;
-}
-
-/* ===== SUPPORT FLOAT BTN ===== */
-.support-float {
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    width: 56px; height: 56px;
-    background: var(--gradient-primary);
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 24px;
-    box-shadow: 0 4px 20px var(--accent-glow);
-    z-index: 100;
-    cursor: pointer;
-    transition: transform 0.3s;
-    text-decoration: none;
-}
-
-.support-float:hover { transform: scale(1.1); }
-
-/* ===== TOAST ===== */
-.toast {
-    position: fixed;
-    bottom: 90px;
-    left: 50%;
-    transform: translateX(-50%) translateY(20px);
-    background: var(--bg-card);
-    border: 1px solid var(--accent-primary);
-    padding: 12px 24px;
-    border-radius: 12px;
-    font-size: 13px;
-    font-weight: 600;
-    opacity: 0;
-    transition: all 0.3s;
-    z-index: 200;
-    pointer-events: none;
-    white-space: nowrap;
-}
-
-.toast.show {
-    opacity: 1;
-    transform: translateX(-50%) translateY(0);
-}
-
-/* ===== SCROLLBAR ===== */
-::-webkit-scrollbar { width: 4px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--accent-primary); border-radius: 4px; }
-
-/* ===== LOADING ===== */
-.loading-overlay {
-    position: fixed;
-    top: 0; left: 0;
-    width: 100%; height: 100%;
-    background: var(--bg-primary);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    z-index: 9999;
-    transition: opacity 0.5s;
-}
-
-.loading-overlay.hidden {
-    opacity: 0;
-    pointer-events: none;
-}
-
-.loading-spinner {
-    width: 48px; height: 48px;
-    border: 3px solid var(--border-color);
-    border-top-color: var(--accent-primary);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin { to { transform: rotate(360deg); } }
-
-.loading-text {
-    margin-top: 16px;
-    font-size: 14px;
-    color: var(--text-secondary);
-    font-weight: 500;
-}
-
-/* Responsive */
-@media (max-width: 360px) {
-    .card-prices { grid-template-columns: 1fr; }
-    .header h1 { font-size: 24px; }
-}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+:root{
+--bg1:#0a0a1a;--bg2:#111128;--bg3:#161640;--bg4:#1c1c50;
+--ac1:#6c5ce7;--ac2:#a29bfe;--acg:rgba(108,92,231,0.3);
+--gold:#ffd700;--green:#00e676;--red:#ff5252;--cyan:#00e5ff;
+--t1:#fff;--t2:#b8b8d4;--t3:#6b6b8d;
+--bc:rgba(108,92,231,0.2);
+--gp:linear-gradient(135deg,#6c5ce7 0%,#a29bfe 100%);
+--gg:linear-gradient(135deg,#f5af19 0%,#f12711 100%)
+}
+body{
+font-family:Inter,-apple-system,BlinkMacSystemFont,sans-serif;
+background:linear-gradient(180deg,#0a0a1a 0%,#0d0d2b 50%,#111128 100%);
+color:var(--t1);min-height:100vh;overflow-x:hidden;position:relative
+}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+
+/* BG ANIMATION */
+.bg-anim{position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;overflow:hidden;pointer-events:none}
+.orb{position:absolute;border-radius:50%;filter:blur(80px);opacity:.15;animation:fo 20s ease-in-out infinite}
+.orb:nth-child(1){width:400px;height:400px;background:#6c5ce7;top:-100px;left:-100px;animation-duration:25s}
+.orb:nth-child(2){width:300px;height:300px;background:#00e5ff;top:50%;right:-80px;animation-delay:-5s;animation-duration:20s}
+.orb:nth-child(3){width:350px;height:350px;background:#f12711;bottom:-100px;left:30%;animation-delay:-10s;animation-duration:30s}
+.orb:nth-child(4){width:250px;height:250px;background:#ffd700;top:30%;left:50%;animation-delay:-7s;animation-duration:22s}
+@keyframes fo{0%,100%{transform:translate(0,0) scale(1)}25%{transform:translate(80px,-60px) scale(1.1)}50%{transform:translate(-40px,80px) scale(.9)}75%{transform:translate(60px,40px) scale(1.05)}}
+
+.bg-grid{position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;pointer-events:none;
+background-image:linear-gradient(rgba(108,92,231,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(108,92,231,.03) 1px,transparent 1px);
+background-size:40px 40px}
+
+.particles{position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;pointer-events:none}
+.particle{position:absolute;width:3px;height:3px;background:var(--ac2);border-radius:50%;opacity:0;animation:pf 8s ease-in-out infinite}
+@keyframes pf{0%{opacity:0;transform:translateY(100vh) scale(0)}10%{opacity:.6}90%{opacity:.6}100%{opacity:0;transform:translateY(-20px) scale(1)}}
+
+/* CONTAINER */
+.app{position:relative;z-index:1;max-width:480px;margin:0 auto;padding:16px;padding-bottom:100px}
+
+/* HEADER */
+.hdr{text-align:center;padding:32px 20px 24px;position:relative}
+.logo-c{position:relative;display:inline-block;margin-bottom:16px}
+.logo-glow{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:120px;height:120px;background:var(--ac1);border-radius:50%;filter:blur(40px);opacity:.4;animation:lg 3s ease-in-out infinite alternate}
+@keyframes lg{0%{opacity:.3;transform:translate(-50%,-50%) scale(.8)}100%{opacity:.6;transform:translate(-50%,-50%) scale(1.2)}}
+.logo-i{position:relative;width:80px;height:80px;background:var(--gp);border-radius:24px;display:flex;align-items:center;justify-content:center;font-size:40px;box-shadow:0 8px 32px rgba(108,92,231,.4);animation:lf 4s ease-in-out infinite}
+@keyframes lf{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+.hdr h1{font-size:28px;font-weight:800;background:linear-gradient(135deg,#fff 0%,#a29bfe 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;letter-spacing:-.5px}
+.hdr .sub{font-size:14px;color:var(--t2);margin-top:6px}
+.hdr .badge{display:inline-flex;align-items:center;gap:6px;background:rgba(0,230,118,.1);border:1px solid rgba(0,230,118,.3);color:var(--green);padding:6px 16px;border-radius:20px;font-size:12px;font-weight:600;margin-top:12px}
+.pulse-dot{width:8px;height:8px;background:var(--green);border-radius:50%;animation:pd 2s ease-in-out infinite}
+@keyframes pd{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.7)}}
+
+/* FEATURES */
+.feat{display:flex;gap:8px;overflow-x:auto;padding:4px 0 16px;scrollbar-width:none;-ms-overflow-style:none}
+.feat::-webkit-scrollbar{display:none}
+.fchip{flex-shrink:0;display:flex;align-items:center;gap:6px;background:var(--bg3);border:1px solid var(--bc);padding:8px 14px;border-radius:12px;font-size:12px;color:var(--t2);font-weight:500;white-space:nowrap;transition:.3s}
+.fchip:hover{border-color:var(--ac1);background:var(--bg4)}
+
+/* SECTION TITLE */
+.stitle{display:flex;align-items:center;gap:10px;margin:24px 0 16px;padding:0 4px}
+.stitle .ln{flex:1;height:1px;background:linear-gradient(90deg,var(--bc) 0%,transparent 100%)}
+.stitle .ln:last-child{background:linear-gradient(90deg,transparent 0%,var(--bc) 100%)}
+.stitle span{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:var(--t3)}
+
+/* PLATFORM TABS */
+.ptabs{display:flex;gap:8px;margin-bottom:20px}
+.ptab{flex:1;padding:14px 16px;background:var(--bg3);border:2px solid var(--bc);border-radius:16px;text-align:center;cursor:pointer;transition:.3s cubic-bezier(.4,0,.2,1);position:relative;overflow:hidden}
+.ptab::before{content:'';position:absolute;top:0;left:0;width:100%;height:100%;background:var(--gp);opacity:0;transition:opacity .3s}
+.ptab.active{border-color:var(--ac1);box-shadow:0 4px 20px var(--acg)}
+.ptab.active::before{opacity:.1}
+.ptab .ti{font-size:28px;display:block;margin-bottom:6px;position:relative;z-index:1}
+.ptab .tl{font-size:13px;font-weight:700;position:relative;z-index:1;color:var(--t2)}
+.ptab.active .tl{color:var(--t1)}
+
+/* PRODUCT CARDS */
+.pgrid{display:flex;flex-direction:column;gap:12px}
+.pcard{background:var(--bg3);border:1px solid var(--bc);border-radius:20px;padding:20px;position:relative;overflow:hidden;cursor:pointer;transition:.3s cubic-bezier(.4,0,.2,1)}
+.pcard:hover{transform:translateY(-2px);border-color:var(--ac1);box-shadow:0 8px 30px var(--acg)}
+.pcard.sel{border-color:var(--ac1);box-shadow:0 4px 24px var(--acg);background:var(--bg4)}
+.pcard .cglow{position:absolute;top:-50%;right:-50%;width:200px;height:200px;background:var(--ac1);border-radius:50%;filter:blur(80px);opacity:0;transition:.5s;pointer-events:none}
+.pcard.sel .cglow,.pcard:hover .cglow{opacity:.08}
+.pcard .popb{position:absolute;top:12px;right:12px;background:var(--gg);color:#000;padding:4px 10px;border-radius:8px;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:1px}
+.pcard .chdr{display:flex;align-items:center;gap:14px;margin-bottom:14px}
+.chdr .pi{width:48px;height:48px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0}
+.chdr .pi.week{background:rgba(0,229,255,.15)}
+.chdr .pi.month{background:rgba(108,92,231,.15)}
+.chdr .pi.forever{background:rgba(255,215,0,.15)}
+.chdr .ci h3{font-size:16px;font-weight:700}
+.chdr .ci .dur{font-size:12px;color:var(--t2);margin-top:2px}
+.cprices{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:12px}
+.ptag{display:flex;align-items:center;gap:6px;background:rgba(255,255,255,.03);padding:8px 10px;border-radius:10px;font-size:13px;font-weight:600}
+.ptag.main{grid-column:1/-1;background:rgba(108,92,231,.1);border:1px solid rgba(108,92,231,.2);font-size:18px;font-weight:800;justify-content:center;padding:12px;color:var(--ac2)}
+
+/* PAYMENT */
+.paysec{display:none;animation:su .4s cubic-bezier(.4,0,.2,1)}
+.paysec.vis{display:block}
+@keyframes su{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+.paymethods{display:flex;flex-direction:column;gap:8px}
+.paybtn{display:flex;align-items:center;gap:14px;background:var(--bg3);border:1px solid var(--bc);border-radius:16px;padding:16px 18px;cursor:pointer;transition:.3s;color:var(--t1);width:100%;font-family:inherit;font-size:15px;font-weight:600}
+.paybtn:hover,.paybtn:active{border-color:var(--ac1);background:var(--bg4);transform:scale(.98)}
+.paybtn .picon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0}
+.paybtn .picon.card{background:rgba(108,92,231,.15)}
+.paybtn .picon.stars{background:rgba(255,193,7,.15)}
+.paybtn .picon.crypto{background:rgba(0,229,255,.15)}
+.paybtn .picon.gold{background:rgba(255,215,0,.15)}
+.paybtn .picon.nft{background:rgba(233,30,99,.15)}
+.paybtn .pinfo{flex:1;text-align:left}
+.paybtn .pinfo .pn{font-weight:600}
+.paybtn .pinfo .pp{font-size:12px;color:var(--t2);margin-top:2px}
+.paybtn .parr{color:var(--t3);font-size:18px}
+
+/* SUMMARY */
+.selsum{display:none;background:linear-gradient(135deg,rgba(108,92,231,.1) 0%,rgba(162,155,254,.05) 100%);border:1px solid rgba(108,92,231,.3);border-radius:16px;padding:16px;margin-bottom:16px;animation:su .3s ease}
+.selsum.vis{display:flex;align-items:center;gap:12px}
+.selsum .si{font-size:32px}
+.selsum .sinfo h4{font-size:15px;font-weight:700}
+.selsum .sinfo p{font-size:12px;color:var(--t2);margin-top:2px}
+
+/* FOOTER */
+.footer{text-align:center;padding:24px 0;color:var(--t3);font-size:12px}
+.footer a{color:var(--ac2);text-decoration:none}
+
+/* SUPPORT FLOAT */
+.sfloat{position:fixed;bottom:20px;right:20px;width:56px;height:56px;background:var(--gp);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:24px;box-shadow:0 4px 20px var(--acg);z-index:100;cursor:pointer;transition:.3s;text-decoration:none}
+.sfloat:hover{transform:scale(1.1)}
+
+/* TOAST */
+.toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--bg3);border:1px solid var(--ac1);padding:12px 24px;border-radius:12px;font-size:13px;font-weight:600;opacity:0;transition:.3s;z-index:200;pointer-events:none;white-space:nowrap}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* LOADING */
+.lov{position:fixed;top:0;left:0;width:100%;height:100%;background:var(--bg1);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;transition:opacity .5s}
+.lov.hid{opacity:0;pointer-events:none}
+.lspin{width:48px;height:48px;border:3px solid var(--bc);border-top-color:var(--ac1);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.ltxt{margin-top:16px;font-size:14px;color:var(--t2);font-weight:500}
+
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--ac1);border-radius:4px}
+@media(max-width:360px){.cprices{grid-template-columns:1fr}.hdr h1{font-size:24px}}
 </style>
 </head>
 <body>
 
-<!-- Loading -->
-<div class="loading-overlay" id="loadingOverlay">
-    <div class="loading-spinner"></div>
-    <div class="loading-text">Загрузка PMT Shop...</div>
+<div class="lov" id="lov">
+<div class="lspin"></div>
+<div class="ltxt">Загрузка PMT Shop...</div>
 </div>
 
-<!-- Background -->
-<div class="bg-animation">
-    <div class="orb"></div>
-    <div class="orb"></div>
-    <div class="orb"></div>
-    <div class="orb"></div>
-</div>
+<div class="bg-anim"><div class="orb"></div><div class="orb"></div><div class="orb"></div><div class="orb"></div></div>
 <div class="bg-grid"></div>
 <div class="particles" id="particles"></div>
 
-<!-- Main App -->
-<div class="app-container">
+<div class="app">
 
-    <!-- Header -->
-    <div class="header">
-        <div class="logo-container">
-            <div class="logo-glow"></div>
-            <div class="logo-icon">🎮</div>
-        </div>
-        <h1>PMT PREMIUM</h1>
-        <div class="subtitle">Standoff 2 Cheat Shop</div>
-        <div class="badge">
-            <span class="pulse-dot"></span>
-            ONLINE • UNDETECTED
-        </div>
-    </div>
-
-    <!-- Features -->
-    <div class="features-bar">
-        <div class="feature-chip"><span class="icon">🎯</span> AimBot</div>
-        <div class="feature-chip"><span class="icon">👁️</span> WallHack</div>
-        <div class="feature-chip"><span class="icon">📍</span> ESP</div>
-        <div class="feature-chip"><span class="icon">🗺️</span> Radar</div>
-        <div class="feature-chip"><span class="icon">🛡️</span> Anti-Ban</div>
-        <div class="feature-chip"><span class="icon">⚡</span> No Root</div>
-    </div>
-
-    <!-- Platform Selection -->
-    <div class="section-title">
-        <div class="line"></div>
-        <span>Платформа</span>
-        <div class="line"></div>
-    </div>
-
-    <div class="platform-tabs">
-        <div class="platform-tab active" data-platform="apk" onclick="selectPlatform('apk')">
-            <span class="tab-icon">📱</span>
-            <span class="tab-label">Android</span>
-        </div>
-        <div class="platform-tab" data-platform="ios" onclick="selectPlatform('ios')">
-            <span class="tab-icon">🍎</span>
-            <span class="tab-label">iOS</span>
-        </div>
-    </div>
-
-    <!-- Products -->
-    <div class="section-title">
-        <div class="line"></div>
-        <span>Тарифы</span>
-        <div class="line"></div>
-    </div>
-
-    <div class="products-grid" id="productsGrid"></div>
-
-    <!-- Selected Summary -->
-    <div class="selected-summary" id="selectedSummary">
-        <div class="sum-icon" id="sumIcon"></div>
-        <div class="sum-info">
-            <h4 id="sumTitle"></h4>
-            <p id="sumDesc"></p>
-        </div>
-    </div>
-
-    <!-- Payment Methods -->
-    <div class="payment-section" id="paymentSection">
-        <div class="section-title">
-            <div class="line"></div>
-            <span>Оплата</span>
-            <div class="line"></div>
-        </div>
-        <div class="payment-methods" id="paymentMethods"></div>
-    </div>
-
-    <!-- Footer -->
-    <div class="footer-info">
-        <p>PMT Premium © 2024</p>
-        <p style="margin-top:4px">Поддержка: <a href="https://t.me/''' + Config.SUPPORT_CHAT_USERNAME + '''">@''' + Config.SUPPORT_CHAT_USERNAME + '''</a></p>
-    </div>
+<div class="hdr">
+<div class="logo-c"><div class="logo-glow"></div><div class="logo-i">🎮</div></div>
+<h1>PMT PREMIUM</h1>
+<div class="sub">Standoff 2 Cheat Shop</div>
+<div class="badge"><span class="pulse-dot"></span>ONLINE • UNDETECTED</div>
 </div>
 
-<!-- Support Button -->
-<a class="support-float" href="https://t.me/''' + Config.SUPPORT_CHAT_USERNAME + '''" target="_blank">💬</a>
+<div class="feat">
+<div class="fchip"><span>🎯</span> AimBot</div>
+<div class="fchip"><span>👁️</span> WallHack</div>
+<div class="fchip"><span>📍</span> ESP</div>
+<div class="fchip"><span>🗺️</span> Radar</div>
+<div class="fchip"><span>🛡️</span> Anti-Ban</div>
+<div class="fchip"><span>⚡</span> No Root</div>
+</div>
 
-<!-- Toast -->
+<div class="stitle"><div class="ln"></div><span>Платформа</span><div class="ln"></div></div>
+
+<div class="ptabs">
+<div class="ptab active" data-platform="apk" onclick="selPlat('apk')"><span class="ti">📱</span><span class="tl">Android</span></div>
+<div class="ptab" data-platform="ios" onclick="selPlat('ios')"><span class="ti">🍎</span><span class="tl">iOS</span></div>
+</div>
+
+<div class="stitle"><div class="ln"></div><span>Тарифы</span><div class="ln"></div></div>
+<div class="pgrid" id="pgrid"></div>
+
+<div class="selsum" id="selsum"><div class="si" id="si"></div><div class="sinfo"><h4 id="st"></h4><p id="sd"></p></div></div>
+
+<div class="paysec" id="paysec">
+<div class="stitle"><div class="ln"></div><span>Оплата</span><div class="ln"></div></div>
+<div class="paymethods" id="paymethods"></div>
+</div>
+
+<div class="footer">
+<p>PMT Premium © 2024</p>
+<p style="margin-top:4px">Поддержка: <a href="https://t.me/""" + Config.SUPPORT_CHAT_USERNAME + """">@""" + Config.SUPPORT_CHAT_USERNAME + """</a></p>
+</div>
+
+</div>
+
+<a class="sfloat" href="https://t.me/""" + Config.SUPPORT_CHAT_USERNAME + """" target="_blank">💬</a>
 <div class="toast" id="toast"></div>
 
 <script>
-// ===== INIT =====
-const tg = window.Telegram.WebApp;
-tg.ready();
-tg.expand();
-tg.setHeaderColor('#0a0a1a');
-tg.setBackgroundColor('#0a0a1a');
+const tg=window.Telegram.WebApp;
+tg.ready();tg.expand();
+try{tg.setHeaderColor('#0a0a1a');tg.setBackgroundColor('#0a0a1a')}catch(e){}
 
-// Products data
-const PRODUCTS = ''' + json.dumps(PRODUCTS, ensure_ascii=False) + ''';
+const P=""" + PRODUCTS_JSON + """;
+let curPlat='apk',curProd=null;
 
-let selectedPlatform = 'apk';
-let selectedProductId = null;
+function mkParts(){
+const c=document.getElementById('particles');
+for(let i=0;i<30;i++){
+const p=document.createElement('div');p.className='particle';
+p.style.left=Math.random()*100+'%';
+p.style.animationDelay=Math.random()*8+'s';
+p.style.animationDuration=(6+Math.random()*6)+'s';
+p.style.width=p.style.height=(2+Math.random()*3)+'px';
+c.appendChild(p)}}
 
-// ===== PARTICLES =====
-function createParticles() {
-    const container = document.getElementById('particles');
-    for (let i = 0; i < 30; i++) {
-        const p = document.createElement('div');
-        p.className = 'particle';
-        p.style.left = Math.random() * 100 + '%';
-        p.style.animationDelay = Math.random() * 8 + 's';
-        p.style.animationDuration = (6 + Math.random() * 6) + 's';
-        p.style.width = p.style.height = (2 + Math.random() * 3) + 'px';
-        container.appendChild(p);
-    }
-}
+function selPlat(pl){
+curPlat=pl;curProd=null;
+document.querySelectorAll('.ptab').forEach(t=>t.classList.toggle('active',t.dataset.platform===pl));
+render();hidePay();hap('light')}
 
-// ===== PLATFORM =====
-function selectPlatform(platform) {
-    selectedPlatform = platform;
-    selectedProductId = null;
-    document.querySelectorAll('.platform-tab').forEach(tab => {
-        tab.classList.toggle('active', tab.dataset.platform === platform);
-    });
-    renderProducts();
-    hidePayment();
-    haptic('light');
-}
+function render(){
+const g=document.getElementById('pgrid');g.innerHTML='';
+const prods=Object.entries(P).filter(([id,p])=>p.platform_code===curPlat);
+prods.forEach(([id,product],i)=>{
+const pop=id.includes('month');
+const pc=id.includes('week')?'week':id.includes('month')?'month':'forever';
+const pe=id.includes('week')?'⚡':id.includes('month')?'🔥':'💎';
+const c=document.createElement('div');c.className='pcard';c.dataset.pid=id;
+c.onclick=()=>selProd(id);
+c.innerHTML=`
+<div class="cglow"></div>
+${pop?'<div class="popb">ХИТ</div>':''}
+<div class="chdr">
+<div class="pi ${pc}">${pe}</div>
+<div class="ci"><h3>${product.period_text}</h3><div class="dur">${product.duration}</div></div>
+</div>
+<div class="cprices">
+<div class="ptag main">💳 ${product.price} ₽</div>
+<div class="ptag">⭐ ${product.price_stars} Stars</div>
+<div class="ptag">₿ ${product.price_crypto_usdt} USDT</div>
+<div class="ptag">🪙 ${product.price_gold} GOLD</div>
+<div class="ptag">🎨 ${product.price_nft} NFT</div>
+</div>`;
+g.appendChild(c)})}
 
-// ===== RENDER PRODUCTS =====
-function renderProducts() {
-    const grid = document.getElementById('productsGrid');
-    grid.innerHTML = '';
+function selProd(id){
+curProd=id;const p=P[id];
+document.querySelectorAll('.pcard').forEach(c=>c.classList.toggle('sel',c.dataset.pid===id));
+const s=document.getElementById('selsum');
+document.getElementById('si').textContent=p.emoji;
+document.getElementById('st').textContent=p.name+' — '+p.period_text;
+document.getElementById('sd').textContent=p.duration+' • '+p.price+' ₽';
+s.classList.add('vis');
+showPay(p);hap('medium');
+setTimeout(()=>document.getElementById('paysec').scrollIntoView({behavior:'smooth',block:'start'}),200)}
 
-    const platformProducts = Object.entries(PRODUCTS).filter(([id, p]) => p.platform_code === selectedPlatform);
+function showPay(p){
+const sec=document.getElementById('paysec'),m=document.getElementById('paymethods');m.innerHTML='';
+const pays=[
+{m:'card',i:'💳',c:'card',n:'Банковская карта',p:p.price+' ₽'},
+{m:'stars',i:'⭐',c:'stars',n:'Telegram Stars',p:p.price_stars+' Stars'},
+{m:'crypto',i:'₿',c:'crypto',n:'Криптовалюта',p:p.price_crypto_usdt+' USDT'},
+{m:'gold',i:'🪙',c:'gold',n:'Standoff GOLD',p:p.price_gold+' GOLD'},
+{m:'nft',i:'🎨',c:'nft',n:'NFT Standoff',p:p.price_nft+' NFT'}
+];
+pays.forEach(pay=>{
+const b=document.createElement('button');b.className='paybtn';
+b.onclick=()=>doPay(pay.m);
+b.innerHTML=`
+<div class="picon ${pay.c}">${pay.i}</div>
+<div class="pinfo"><div class="pn">${pay.n}</div><div class="pp">${pay.p}</div></div>
+<div class="parr">›</div>`;
+m.appendChild(b)});
+sec.classList.add('vis')}
 
-    platformProducts.forEach(([id, product], index) => {
-        const isPopular = id.includes('month');
-        const periodClass = id.includes('week') ? 'week' : id.includes('month') ? 'month' : 'forever';
-        const periodEmoji = id.includes('week') ? '⚡' : id.includes('month') ? '🔥' : '💎';
+function hidePay(){
+document.getElementById('paysec').classList.remove('vis');
+document.getElementById('selsum').classList.remove('vis')}
 
-        const card = document.createElement('div');
-        card.className = 'product-card';
-        card.dataset.productId = id;
-        card.style.animationDelay = (index * 0.1) + 's';
-        card.onclick = () => selectProduct(id);
+function doPay(method){
+if(!curProd){toast('Выберите тариф!');return}
+hap('heavy');toast('⏳ Создаём заказ...');
+const d={action:'buy',product_id:curProd,payment_method:method};
+try{tg.sendData(JSON.stringify(d))}catch(e){toast('❌ Ошибка');console.error(e)}}
 
-        card.innerHTML = `
-            <div class="card-glow"></div>
-            ${isPopular ? '<div class="popular-badge">ПОПУЛЯРНЫЙ</div>' : ''}
-            <div class="card-header">
-                <div class="period-icon ${periodClass}">${periodEmoji}</div>
-                <div class="card-info">
-                    <h3>${product.period_text}</h3>
-                    <div class="duration">${product.duration}</div>
-                </div>
-            </div>
-            <div class="card-prices">
-                <div class="price-tag main-price">
-                    <span class="price-icon">💳</span> ${product.price} ₽
-                </div>
-                <div class="price-tag">
-                    <span class="price-icon">⭐</span> ${product.price_stars} Stars
-                </div>
-                <div class="price-tag">
-                    <span class="price-icon">₿</span> ${product.price_crypto_usdt} USDT
-                </div>
-                <div class="price-tag">
-                    <span class="price-icon">🪙</span> ${product.price_gold} GOLD
-                </div>
-                <div class="price-tag">
-                    <span class="price-icon">🎨</span> ${product.price_nft} NFT
-                </div>
-            </div>
-        `;
-        grid.appendChild(card);
-    });
-}
+function toast(t){
+const el=document.getElementById('toast');el.textContent=t;el.classList.add('show');
+setTimeout(()=>el.classList.remove('show'),2500)}
 
-// ===== SELECT PRODUCT =====
-function selectProduct(productId) {
-    selectedProductId = productId;
-    const product = PRODUCTS[productId];
+function hap(t){try{
+if(t==='light')tg.HapticFeedback.impactOccurred('light');
+else if(t==='medium')tg.HapticFeedback.impactOccurred('medium');
+else if(t==='heavy')tg.HapticFeedback.impactOccurred('heavy');
+}catch(e){}}
 
-    // Highlight card
-    document.querySelectorAll('.product-card').forEach(card => {
-        card.classList.toggle('selected', card.dataset.productId === productId);
-    });
-
-    // Summary
-    const summary = document.getElementById('selectedSummary');
-    document.getElementById('sumIcon').textContent = product.emoji;
-    document.getElementById('sumTitle').textContent = `${product.name} — ${product.period_text}`;
-    document.getElementById('sumDesc').textContent = `${product.duration} • ${product.price} ₽`;
-    summary.classList.add('visible');
-
-    // Show payments
-    showPayment(product);
-    haptic('medium');
-
-    // Scroll to payment
-    setTimeout(() => {
-        document.getElementById('paymentSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 200);
-}
-
-// ===== PAYMENT =====
-function showPayment(product) {
-    const section = document.getElementById('paymentSection');
-    const methods = document.getElementById('paymentMethods');
-    methods.innerHTML = '';
-
-    const payments = [
-        { method: 'card', icon: '💳', iconClass: 'card', name: 'Банковская карта', price: `${product.price} ₽` },
-        { method: 'stars', icon: '⭐', iconClass: 'stars', name: 'Telegram Stars', price: `${product.price_stars} Stars` },
-        { method: 'crypto', icon: '₿', iconClass: 'crypto', name: 'Криптовалюта', price: `${product.price_crypto_usdt} USDT` },
-        { method: 'gold', icon: '🪙', iconClass: 'gold', name: 'Standoff GOLD', price: `${product.price_gold} GOLD` },
-        { method: 'nft', icon: '🎨', iconClass: 'nft', name: 'NFT Standoff', price: `${product.price_nft} NFT` }
-    ];
-
-    payments.forEach((pay, i) => {
-        const btn = document.createElement('button');
-        btn.className = 'payment-btn';
-        btn.style.animationDelay = (i * 0.05) + 's';
-        btn.onclick = () => processPayment(pay.method);
-        btn.innerHTML = `
-            <div class="pay-icon ${pay.iconClass}">${pay.icon}</div>
-            <div class="pay-info">
-                <div class="pay-name">${pay.name}</div>
-                <div class="pay-price">${pay.price}</div>
-            </div>
-            <div class="pay-arrow">›</div>
-        `;
-        methods.appendChild(btn);
-    });
-
-    section.classList.add('visible');
-}
-
-function hidePayment() {
-    document.getElementById('paymentSection').classList.remove('visible');
-    document.getElementById('selectedSummary').classList.remove('visible');
-}
-
-// ===== PROCESS PAYMENT =====
-function processPayment(method) {
-    if (!selectedProductId) {
-        showToast('Выберите тариф!');
-        return;
-    }
-
-    haptic('heavy');
-    showToast('⏳ Создаём заказ...');
-
-    const data = {
-        action: 'buy',
-        product_id: selectedProductId,
-        payment_method: method
-    };
-
-    try {
-        tg.sendData(JSON.stringify(data));
-    } catch(e) {
-        showToast('❌ Ошибка отправки');
-        console.error(e);
-    }
-}
-
-// ===== UTILS =====
-function showToast(text) {
-    const toast = document.getElementById('toast');
-    toast.textContent = text;
-    toast.classList.add('show');
-    setTimeout(() => toast.classList.remove('show'), 2500);
-}
-
-function haptic(type) {
-    try {
-        if (type === 'light') tg.HapticFeedback.impactOccurred('light');
-        else if (type === 'medium') tg.HapticFeedback.impactOccurred('medium');
-        else if (type === 'heavy') tg.HapticFeedback.impactOccurred('heavy');
-    } catch(e) {}
-}
-
-// ===== INIT =====
-window.addEventListener('load', () => {
-    createParticles();
-    renderProducts();
-
-    // Hide loading
-    setTimeout(() => {
-        document.getElementById('loadingOverlay').classList.add('hidden');
-    }, 800);
-});
+window.addEventListener('load',()=>{mkParts();render();setTimeout(()=>document.getElementById('lov').classList.add('hid'),600)});
 </script>
 </body>
-</html>'''
+</html>"""
 
-@flask_app.route('/')
-def miniapp_index():
-    return Response(MINIAPP_HTML, mimetype='text/html')
 
-@flask_app.route('/api/products')
-def api_products():
-    return jsonify(PRODUCTS)
+# =============================================
+# ========== AIOHTTP WEB SERVER ===============
+# =============================================
 
-@flask_app.route('/api/health')
-def api_health():
-    return jsonify({"status": "ok", "time": time.time()})
+async def handle_index(request):
+    return web.Response(text=MINIAPP_HTML, content_type='text/html', charset='utf-8')
+
+async def handle_api_products(request):
+    return web.json_response(PRODUCTS)
+
+async def handle_api_health(request):
+    return web.json_response({"status": "ok", "time": time.time()})
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_index)
+    app.router.add_get('/api/products', handle_api_products)
+    app.router.add_get('/api/health', handle_api_health)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', Config.WEBAPP_PORT)
+    await site.start()
+    logger.info("🌐 MiniApp web server started on port %s", Config.WEBAPP_PORT)
+    return runner
 
 
 # ========== ЗАПУСК ==========
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    flask_app.run(host='0.0.0.0', port=port, debug=False)
-
-
-async def run_bot():
-    global bot_loop
-    bot_loop = asyncio.get_event_loop()
+async def main():
     logger.info("=" * 50)
     logger.info("PMT PREMIUM CHEAT SHOP — Bot + MiniApp")
     logger.info("=" * 50)
     logger.info("ADMIN_IDS: %s", Config.ADMIN_IDS)
     logger.info("WEBAPP: %s", Config.WEBAPP_URL)
+    logger.info("PORT: %s", Config.WEBAPP_PORT)
+
+    # Запускаем веб-сервер
+    web_runner = await start_web_server()
+
     try:
         me = await bot.get_me()
         logger.info("Bot: @%s", me.username)
         for key, product in PRODUCTS.items():
             logger.info("%s %s (%s) - %s RUB / %s Stars", product['emoji'], product['name'], product['duration'], product['price'], product['price_stars'])
+        logger.info("🚀 Bot starting polling...")
         await dp.start_polling(bot)
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
     except Exception as e:
         logger.error("Fatal: %s", e)
         import traceback
         traceback.print_exc()
     finally:
+        await web_runner.cleanup()
         await bot.session.close()
-
-
-def main():
-    # Flask в отдельном потоке
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("Flask MiniApp started on port %s", os.environ.get("PORT", 8080))
-
-    # Bot в основном потоке
-    asyncio.run(run_bot())
+        logger.info("Bot stopped")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
